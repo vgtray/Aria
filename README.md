@@ -8,6 +8,8 @@
 [![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)](https://www.python.org/)
 [![React](https://img.shields.io/badge/React-19-blue?logo=react)](https://react.dev/)
 [![TimescaleDB](https://img.shields.io/badge/TimescaleDB-PostgreSQL-blue?logo=postgresql)](https://www.timescale.com/)
+[![Winner](https://img.shields.io/badge/Anthropic_Hackathon-Best_Managed_Agents-gold?logo=anthropic)](https://cerebralvalley.ai/e/built-with-4-7-hackathon/hackathon/gallery)
+
 
 </div>
 
