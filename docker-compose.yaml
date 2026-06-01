@@ -1,7 +1,27 @@
-# ============================================
-# ARIA — Docker Compose
-# Services: timescaledb, migrate (one-shot), simulator, backend, frontend
-# ============================================
+# ============================================================
+# ARIA — Docker Compose (branche `deploy` — Dokploy/Traefik)
+# ============================================================
+# ⚠️  Cette version est SPÉCIFIQUE à la branche `deploy` (déploiement
+#     Dokploy perso sur le fork vgtray/Aria). NE JAMAIS la merger sur
+#     `main` ni la pousser sur `zestones/Aria` — elle casserait le
+#     `docker compose up` local de l'équipe (cf. revert PR #140).
+#     Le compose de dev local vit sur `main`.
+#
+# Modèle réseau :
+#   - Réseau interne `aria` : tous les services communiquent par hostname
+#     (timescaledb, backend, ...). Rien n'est publié sur l'hôte (`expose`,
+#     pas `ports`) → plus de conflit de port 5432 sur le serveur Dokploy.
+#   - Seul le `frontend` rejoint `dokploy-network` (réseau Traefik partagé)
+#     et est exposé en HTTPS. Le backend reste INTERNE : le frontend
+#     proxifie `/api` → `backend:8000` (voir frontend/vite.config.ts).
+#     → la base de données n'est jamais sur le réseau partagé.
+#
+# Déploiement Dokploy :
+#   - Type "Docker Compose", branche `deploy`, fichier `docker-compose.yaml`.
+#   - Variables d'env (onglet Environment) : voir .env.example.
+#     FRONTEND_HOST doit valoir le domaine servi (def: aria.vgtray.fr,
+#     qui doit aussi figurer dans `allowedHosts` de vite.config.ts).
+# ============================================================
 
 services:
   timescaledb:
@@ -12,8 +32,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    # Pas de `ports` : la DB reste interne au réseau `aria`.
+    expose:
+      - "5432"
     volumes:
       - aria_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -157,16 +178,31 @@ services:
       # derives it from ARIA_MCP_PATH_SECRET at startup. If the secret is
       # unset or is a placeholder the backend refuses to start with a clear
       # error message — set it with: openssl rand -hex 32
-      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000","http://localhost:8000"]'
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    # Dev: mount source so uvicorn --reload picks up edits without rebuilding the image.
-    volumes:
-      - ./backend:/app:ro
+      # CORS : le frontend appelle le backend via le proxy Vite (même
+      # origin que FRONTEND_HOST), donc on autorise ce seul domaine.
+      CORS_ORIGINS: '["https://${FRONTEND_HOST:-aria.vgtray.fr}"]'
+    # Interne uniquement : joignable par le frontend via hostname `backend`.
+    expose:
+      - "8000"
+    # Prod : pas de --reload, pas de bind-mount (le code est dans l'image).
+    # --proxy-headers : uvicorn est derrière le proxy Vite/Traefik.
     command:
-      ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
     restart: unless-stopped
     networks: [aria]
+    # ── Backend public (OPTIONNEL — uniquement si INVESTIGATOR_USE_MANAGED=true)
+    # Anthropic doit alors atteindre ARIA_MCP_PUBLIC_URL. Pour exposer le
+    # backend, décommente ci-dessous, ajoute `dokploy-network` à `networks`
+    # et set BACKEND_HOST + ARIA_MCP_PUBLIC_URL dans l'env Dokploy.
+    # networks: [aria, dokploy-network]
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.docker.network=dokploy-network"
+    #   - "traefik.http.routers.aria-backend.rule=Host(`${BACKEND_HOST}`)"
+    #   - "traefik.http.routers.aria-backend.entrypoints=websecure"
+    #   - "traefik.http.routers.aria-backend.tls=true"
+    #   - "traefik.http.routers.aria-backend.tls.certresolver=letsencrypt"
+    #   - "traefik.http.services.aria-backend.loadbalancer.server.port=8000"
 
   tunnel:
     image: cloudflare/cloudflared:latest
@@ -186,21 +222,29 @@ services:
     depends_on:
       - backend
     environment:
+      # Cible du proxy Vite `/api` (voir frontend/vite.config.ts).
       VITE_API_URL: http://backend:8000
-    ports:
-      - "${FRONTEND_PORT:-5173}:5173"
-    # Dev: bind-mount source for hot reload (preserve container node_modules).
-    volumes:
-      - ./frontend:/app
-      - aria_frontend_node_modules:/app/node_modules
-    command: ["sh", "-lc", "npm install --no-audit --no-fund && npm run dev"]
+    # Pas de `ports` : exposé via Traefik (dokploy-network), pas sur l'hôte.
+    expose:
+      - "5173"
+    # Prod : pas de bind-mount ni `npm install` runtime (fait au build).
+    # Le CMD de l'image (`vite --host 0.0.0.0 --port 5173`) prend le relais.
     restart: unless-stopped
-    networks: [aria]
+    networks: [aria, dokploy-network]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=dokploy-network"
+      - "traefik.http.routers.aria-front.rule=Host(`${FRONTEND_HOST:-aria.vgtray.fr}`)"
+      - "traefik.http.routers.aria-front.entrypoints=websecure"
+      - "traefik.http.routers.aria-front.tls=true"
+      - "traefik.http.routers.aria-front.tls.certresolver=letsencrypt"
+      - "traefik.http.services.aria-front.loadbalancer.server.port=5173"
 
 volumes:
   aria_pgdata:
-  aria_frontend_node_modules:
 
 networks:
   aria:
     driver: bridge
+  dokploy-network:
+    external: true
